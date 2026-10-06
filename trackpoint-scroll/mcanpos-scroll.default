@@ -1,0 +1,23 @@
+# Key that triggers scrolling.
+#
+# Recommended (no X keysym at all, so nothing can react to them):
+#   KEY_F19  KEY_F24
+#
+# Usable, but mapped to XF86Launch5-9 (unbound in GNOME by default):
+#   KEY_F14  KEY_F15  KEY_F16  KEY_F17  KEY_F18
+#
+# Do not use (they collide with desktop defaults):
+#   KEY_F13     -> XF86Tools         opens GNOME Settings
+#   KEY_F21     -> XF86TouchpadToggle
+#   KEY_F22     -> XF86TouchpadOn
+#   KEY_F23     -> XF86TouchpadOff
+#   KEY_KPEQUAL -> types "="
+SCROLL_KEY=KEY_F19
+
+# Presses shorter than this (milliseconds) latch scroll mode on release;
+# longer presses end the scroll when released.
+LOCK_THRESHOLD_MS=250
+
+# USB IDs of the target keyboard. Override for other models.
+#DEVICE_VENDOR=0x04B3
+#DEVICE_PRODUCT=0x4609

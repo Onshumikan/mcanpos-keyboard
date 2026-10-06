@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""Scroll bridge for the TrackPoint on a Toshiba Global Commerce POS keyboard.
+
+The TrackPoint on this keyboard (04b3:4609) has no physical middle button.
+libinput requires the button scrolling trigger to be a physical button on the
+same device that produces the motion events (libinput docs, "Scrolling": the
+button must be on the same device as the motion events), so a BTN_MIDDLE
+synthesized by middle-button emulation never starts a scroll.
+
+This daemon grabs the pointer device exclusively, relays it through a virtual
+device, and injects a spare keyboard key into that virtual device as a genuine
+BTN_MIDDLE. libinput then sees a single TrackPoint carrying both motion and a
+real middle button, and its standard button scrolling works unchanged.
+
+The keyboard is never grabbed. If this service stops, typing still works and
+the user can recover normally.
+
+Key handling mirrors libinput's ScrollButtonLock:
+  - press and hold, then release -> scrolls only while held
+  - quick tap                    -> scroll mode latches (tap again to release)
+"""
+
+import os
+import select
+import signal
+import sys
+import time
+
+import evdev
+from evdev import UInput, ecodes
+
+# Target device. Defaults to the Toshiba Global Commerce Solutions USB Compact
+# Alphanumeric POS Keyboard; override via environment for other models.
+VENDOR = int(os.environ.get("DEVICE_VENDOR", "0x04B3"), 16)
+PRODUCT = int(os.environ.get("DEVICE_PRODUCT", "0x4609"), 16)
+VIRTUAL_NAME = os.environ.get("VIRTUAL_NAME", "MCANPOS TrackPoint")
+
+SCROLL_KEY = os.environ.get("SCROLL_KEY", "KEY_F19")
+LOCK_THRESHOLD = float(os.environ.get("LOCK_THRESHOLD_MS", "250")) / 1000.0
+WAIT_TIMEOUT = float(os.environ.get("WAIT_TIMEOUT_S", "60"))
+
+FORWARD_BUTTONS = (ecodes.BTN_LEFT, ecodes.BTN_RIGHT)
+
+CAPABILITIES = {
+    ecodes.EV_KEY: [ecodes.BTN_LEFT, ecodes.BTN_RIGHT, ecodes.BTN_MIDDLE],
+    ecodes.EV_REL: [ecodes.REL_X, ecodes.REL_Y],
+}
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+try:
+    SCROLL_CODE = ecodes.ecodes[SCROLL_KEY]
+except KeyError:
+    sys.exit(f"unknown key name: SCROLL_KEY={SCROLL_KEY}")
+
+
+def find_devices():
+    """Locate the pointer and keyboard nodes by vendor/product and capability.
+    Event numbers change across replugs, so they are never hardcoded."""
+    pointer = keyboard = None
+    for path in evdev.list_devices():
+        try:
+            dev = evdev.InputDevice(path)
+        except OSError:
+            continue
+        if dev.info.vendor != VENDOR or dev.info.product != PRODUCT:
+            dev.close()
+            continue
+        caps = dev.capabilities()
+        if ecodes.REL_X in caps.get(ecodes.EV_REL, []):
+            pointer = dev
+        elif SCROLL_CODE in caps.get(ecodes.EV_KEY, []):
+            keyboard = dev
+        else:
+            dev.close()
+    return pointer, keyboard
+
+
+def wait_for_devices():
+    """At boot or just after a replug the nodes may not be present yet."""
+    deadline = time.monotonic() + WAIT_TIMEOUT
+    while True:
+        pointer, keyboard = find_devices()
+        if pointer and keyboard:
+            return pointer, keyboard
+        for dev in (pointer, keyboard):
+            if dev:
+                dev.close()
+        if time.monotonic() >= deadline:
+            sys.exit(f"target device not found ({VENDOR:04x}:{PRODUCT:04x})")
+        time.sleep(1.0)
+
+
+def make_virtual_device():
+    """Setting INPUT_PROP_POINTING_STICK makes systemd's input_id tag the
+    device ID_INPUT_POINTINGSTICK=1, so libinput enables button scrolling."""
+    try:
+        return UInput(CAPABILITIES, name=VIRTUAL_NAME, vendor=VENDOR,
+                      product=PRODUCT, version=1,
+                      input_props=[ecodes.INPUT_PROP_POINTING_STICK])
+    except TypeError:
+        # Fallback for older python-evdev without input_props support
+        log("warning: input_props unsupported; a udev rule is needed instead")
+        return UInput(CAPABILITIES, name=VIRTUAL_NAME, vendor=VENDOR,
+                      product=PRODUCT, version=1)
+
+
+class ScrollButton:
+    """State machine turning scroll-key presses into BTN_MIDDLE events."""
+
+    def __init__(self, ui):
+        self.ui = ui
+        self.down = False      # is BTN_MIDDLE currently held down
+        self.locked = False    # latched by a quick tap
+        self.press_ts = 0.0
+        self.consumed = False  # this press was used to release the latch
+
+    def _emit(self, value):
+        self.ui.write(ecodes.EV_KEY, ecodes.BTN_MIDDLE, value)
+        self.ui.syn()
+
+    def handle(self, event):
+        if event.value == 2:   # ignore auto-repeat
+            return
+        now = time.monotonic()
+        if event.value == 1:
+            if self.locked:
+                self._emit(0)
+                self.down = self.locked = False
+                self.consumed = True
+            else:
+                self._emit(1)
+                self.down = True
+                self.press_ts = now
+                self.consumed = False
+        else:
+            if self.consumed:
+                self.consumed = False
+                return
+            if not self.down:
+                return
+            if now - self.press_ts < LOCK_THRESHOLD:
+                self.locked = True   # keep BTN_MIDDLE held
+            else:
+                self._emit(0)
+                self.down = False
+
+    def release(self):
+        if self.down:
+            self._emit(0)
+            self.down = False
+
+
+def main():
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+
+    pointer, keyboard = wait_for_devices()
+    log(f"pointer={pointer.path} keyboard={keyboard.path} scroll_key={SCROLL_KEY}")
+
+    ui = make_virtual_device()
+    button = ScrollButton(ui)
+    pointer.grab()
+    try:
+        while True:
+            ready, _, _ = select.select([pointer.fd, keyboard.fd], [], [])
+            if pointer.fd in ready:
+                for event in pointer.read():
+                    if event.type == ecodes.EV_REL and event.code in (ecodes.REL_X, ecodes.REL_Y):
+                        ui.write_event(event)
+                    elif event.type == ecodes.EV_KEY and event.code in FORWARD_BUTTONS:
+                        ui.write_event(event)
+                    elif event.type == ecodes.EV_SYN:
+                        ui.write_event(event)
+            if keyboard.fd in ready:
+                for event in keyboard.read():
+                    if event.type == ecodes.EV_KEY and event.code == SCROLL_CODE:
+                        button.handle(event)
+    except OSError:
+        # Device vanished (e.g. unplugged). systemd will restart us.
+        log("device disconnected; exiting")
+    finally:
+        button.release()
+        try:
+            pointer.ungrab()
+        except OSError:
+            pass
+        ui.close()
+
+
+if __name__ == "__main__":
+    main()

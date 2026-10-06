@@ -1,0 +1,14 @@
+[Unit]
+Description=MCANPOS TrackPoint scroll bridge
+Documentation=https://wayland.freedesktop.org/libinput/doc/latest/scrolling.html
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/default/mcanpos-scroll
+ExecStart=/usr/local/bin/mcanpos-scroll
+# The daemon exits when the keyboard is unplugged; always bring it back.
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

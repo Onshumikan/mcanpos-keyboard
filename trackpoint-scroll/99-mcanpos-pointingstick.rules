@@ -1,0 +1,9 @@
+# Tag the physical TrackPoint of the Toshiba Global Commerce POS keyboard
+# (04b3:4609) as a pointing stick, so libinput enables button scrolling on it.
+#
+# Optional: mcanpos-scroll does not need this rule, because the virtual device
+# it creates carries INPUT_PROP_POINTING_STICK of its own. Install it only if
+# you want the bare hardware to behave correctly when the daemon is not
+# running. Replug the keyboard afterwards -- udev properties are not
+# re-evaluated until the device is re-enumerated.
+SUBSYSTEM=="input", ENV{ID_INPUT_MOUSE}=="1", ATTRS{idVendor}=="04b3", ATTRS{idProduct}=="4609", ENV{ID_INPUT_MOUSE}="", ENV{ID_INPUT_POINTINGSTICK}="1"
