@@ -83,7 +83,7 @@ works and you can recover normally.
 
 ```sh
 sudo apt install -y python3-evdev        # Debian/Ubuntu
-git clone https://github.com/Aaron-Morimoto/mcanpos-keyboard.git
+git clone https://github.com/Onshumikan/mcanpos-keyboard.git
 sudo ./mcanpos-keyboard/trackpoint-scroll/install.sh
 ```
 
